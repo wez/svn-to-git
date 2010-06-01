@@ -745,6 +745,7 @@ while ($climit === null || $climit--) {
           $mkey = "commit-$msource->branch-$msource->rev";
           if (isset($mark_cache[$mkey])) {
             $mid = $mark_cache[$mkey];
+            fwrite($exp, "# adding $mid as merge source due to svn:mergeinfo\n");
             $merge_sources[$mid] = $mid;
           }
         }
@@ -768,6 +769,7 @@ while ($climit === null || $climit--) {
               if ($cb && isset($mark_cache["commit-$cb->name-$crev"])) {
                 $mid = $mark_cache["commit-$cb->name-$crev"];
                 $merge_sources[$mid] = $mid;
+                fwrite($exp, "# adding $mid as merge source due to copy from $node->path\n");
               }
               if (isset($mark_cache["file:$crev@$cpath"])) {
                 /* make an alias */
@@ -930,6 +932,68 @@ while ($climit === null || $climit--) {
 
     fwrite($exp, "# svn [$rev]\n");
     fwrite($exp, "progress rev [$rev]\n");
+
+    /* figure out whether we need to kill or re-create the branch.
+     * This is made more complicated by the possibility for one svn
+     * commit to both delete and create in the same commit */
+
+    $do_delete_all = false;
+    $commit_source = null;
+
+    foreach ($nodes as $node) {
+      if (is_excluded($node->path)) continue;
+      if ($node->path == $b->name) {
+        if ($node->action == 'delete') {
+          $do_delete_all = true;
+          $b->deleted = $rev;
+          continue;
+        }
+
+        if ($node->action == 'add') {
+          if (isset($node->meta['node-copyfrom-path'])) {
+            $spath = $node->meta['node-copyfrom-path'];
+            $srev = $node->meta['node-copyfrom-rev'];
+            $sb = find_branch($spath);
+            if (!$sb) {
+              echo "FATAL: could not locate source branch $spath @ $srev\n";
+              echo "FATAL: while recreating $b->name @ $rev\n";
+              exit(1);
+            }
+            $mid = null;
+            while ($mid === null) {
+              $mid = $mark_cache["commit-$sb->name-$srev"];
+              if ($mid !== null) {
+                break;
+              }
+              if ($srev-- == 0) {
+                break;
+              }
+            }
+            if ($mid !== null) {
+              $commit_source = $mid;
+            } else {
+              echo "FATAL: could not find mark for source $spath @ $srev\n";
+              echo "FATAL: while recreating $b->name @ $rev\n";
+              exit(1);
+            }
+          }
+        }
+
+        if ($b->deleted !== null) {
+          if ($node->action == 'add') {
+            fprintf($exp, "reset refs/heads/$b->bname\n");
+            $b->deleted = null;
+            $do_delete_all = false;
+            continue;
+          }
+
+          var_dump($node);
+          echo "Deleted in $b->deleted\n";
+          exit;
+        }
+      }
+    }
+
     fprintf($exp, "commit refs/heads/$b->bname\n");
     $mid = $nextmark++;
     $mark_cache["commit-$b->name-$rev"] = $mid;
@@ -941,12 +1005,20 @@ while ($climit === null || $climit--) {
     fprintf($exp,
       "committer $author $when -0000\n");
     fprintf($exp, "data %d\n%s\n", strlen($log), $log);
-    if ($b->createdrev == $rev && $b->origin !== null &&
-        $b->origin->last_mark) {
-      fprintf($exp, "from :%d\n", $b->origin->last_mark);
+    if ($commit_source !== null) {
+      fprintf($exp, "from :%d\n", $commit_source);
+    } else if ($b->createdrev == $rev && $b->origin !== null) {
+      if ($b->origin->last_mark) {
+        fprintf($exp, "from :%d\n", $b->origin->last_mark);
+      } else {
+        var_dump($nodes);
+        echo "created in this rev, but have no last mark\n";
+        echo "$b\nOrigin: $b->origin\n";
+        exit(1);
+      }
     }
 
-    if (preg_match("/(?:merge|revert)/i", $R->revprops['svn:log']) &&
+    if (preg_match("/(?:merge|revert|take)/i", $R->revprops['svn:log']) &&
         preg_match_all("/(?:^|\s|,)(\[\d+\]|r\d+|\d+)(?:,|\s|$)/sm",
           $R->revprops['svn:log'], $M)) {
       foreach ($M[1] as $mrev) {
@@ -957,12 +1029,16 @@ while ($climit === null || $climit--) {
         } else {
           $smid = $mark_cache["commitbyrev-$srev"];
           $merge_sources[$smid] = $smid;
+          fwrite($exp, "# adding $smid as merge source due to commit log rev $srev\n");
         }
       }
     }
 
+    $last_mid = $mark_cache["commitbyrev-" . ($rev-1)];
     foreach ($merge_sources as $merge_mark) {
-      fprintf($exp, "merge :%d\n", $merge_mark);
+      if ($merge_mark !== $last_mid) {
+        fprintf($exp, "merge :%d\n", $merge_mark);
+      }
     }
 
     foreach ($nodes as $node) {
@@ -971,7 +1047,17 @@ while ($climit === null || $climit--) {
         continue;
       }
       if ($node->action == 'delete') {
-        fprintf($exp, "D %s\n", $b->fixpath($node->path));
+        if ($node->path == $b->name) {
+          if (!$do_delete_all) {
+            continue;
+          }
+          fprintf($exp, "deleteall\n");
+          echo "Treating as deleteall:\n";
+          var_dump($nodes);
+          $b->deleted = $rev;
+        } else {
+          fprintf($exp, "D %s\n", $b->fixpath($node->path));
+        }
         continue;
       }
       if ($node->kind == 'file') {
