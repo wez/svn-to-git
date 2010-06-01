@@ -87,14 +87,179 @@ $opt = getopt(
     "exclude-branch:",
     "authors:",
     "annotate-commit",
+    "help",
   )
 );
+
+if (isset($opt['help']) || count($opt) == 0) {
+  echo <<<TXT
+svn-to-git
+by Wez Furlong <http://github.com/wez/svn-to-git>
+Copyright (c) 2010, Message Systems, Inc.
+
+Convert a Subversion repository to Git.
+
+Mandatory Options:
+
+  --svn-dump /path/to/dump/file
+
+       The dump file can be created using "svnadmin dump".
+       Do NOT use --incremental or --deltas; just use a straight-up
+       dump and create a dump format version 2 file.
+
+Common Options:
+
+  --git-repo /path/to/git/repo/dir
+
+       Specify the target Git repo.  This must exist and be already
+       initialized.  You can do this for yourself:
+
+            $ mkdir /path/to/git/repo/dir
+            $ git init /path/to/git/repo/dir
+
+       If you do not specify a target, svn-to-git will stop after the
+       analysis stage.
+
+  --authors /path/to/author/file
+
+       The author file enables mapping from Subversion usernames to
+       Git author information, which includes the full name and email
+       address.  The file format is compatible with the git-svn authors
+       file; each line is a mapping entry of the form:
+
+          subversionuser = FirstName LastName <email@domain>
+
+       A listing of subversion users that are defined in the map is
+       printed out after the analysis phase of processing.
+
+       You may want to use the --analyze option to cause processing
+       to stop at that point so that you can flesh out the authors
+       file.
+
+  --mainline trunk
+
+       Specify the mainline branch; this will named "master" in the
+       Git repository.  The default is trunk, but you may specify an
+       alternative location in the repo if you have multiple projects
+       and want to convert a specific project.
+
+  --branch branches/foo/bar
+
+       Indicate that the named subversion branch should be included
+       in the Git repository.  svn-to-git will infer branches based
+       on the copy/merge activity associated with the mainline branch,
+       but may get confused if the first activity occurs within a
+       sub-directory of the true branch.
+
+       svn-to-git will halt during analysis if a merge is made to
+       one of the followed branches from an area outside of the followed
+       branches.  In this situation, you will be prompted to use either
+       --branch or --exclude-branch to enable tracking of the foreign
+       branch.  The analysis must then be re-run from the start.
+
+       --branch can be used multiple times.
+
+  --exclude-branch branches/foo/bar
+
+       Indicate that the named subversion branch should not be included
+       in the Git repository.
+
+       This does not perform 100% of the intended actions, as some
+       activity is sourced from the excluded area and needs to be
+       tracked during the import.  It does cause the import to ignore
+       activity on excluded branches that is not directly related
+       to the mainline, however.
+       
+       --exclude-branch can be used multiple times.
+
+Less Common Options:
+
+  --analyze
+
+       Causes svn-to-git to halt after performing analysis.
+       The data it gathered is cached.  You may complete a run using
+       the cached analysis data via the --complete option.
+
+  --complete
+
+       Resume operation after the analysis step.
+
+  --limit 1000
+
+       Limit the import to processing the specified number of revisions.
+       This is useful for testing a limited run of the conversion.
+       You may specify differing limits for the analysis and completion
+       stages if you wish.  The completion stage will adjust its limit
+       so that it does not exceed the number of revisions processed
+       during analysis.
+
+  --no-blobs
+
+       If specified, the Git import will use empty files instead of
+       the actual data from the repository.  This allows for a fast
+       import to verify that the metadata and branching is correct.
+
+  --git-dump-file /path/to/dump/file
+
+       If used in place of --git-repo, instead of running the import,
+       the data feed that would have been passed to "git fast-import"
+       is output to the specified file.  This allows inspection of
+       the data feed, but will take longer to apply to the target
+       Git repository.
+
+  --use-mergeinfo
+
+       If specified, svn:mergeinfo properties will be used to infer
+       merge information.  This works best when the repository was
+       created with that information from the outset.
+
+       This capability is disabled by default.
+
+  --exclude-pattern regex
+
+       When specified, any file names that match this regex will
+       be suppressed from the import.
+
+  --annotate-commit
+
+       When specified, the commit log provided to Git will be annotated
+       with the origin subversion changeset number.
+
+Rare Options:
+
+  --git-mark-file git.marks
+
+       If specified, allows the git.marks file path to be changed.
+       The default is to create git.marks in the current directory.
+       The Git marks file is used to generate the svn mark file.
+
+  --svn-mark-file svn.marks
+
+       If specified, allows the svn.marks file path to be changed.
+       The default is to create svn.marks in the current directory.
+
+       The contents of this file contain a mapping of subversion changeset
+       number to Git commit SHA-1 hash.
+
+       This is provided to aid in the verification of the migration.
+
+  --cache .ana
+
+       If specified, allows the analysis cache file path to be changed.
+       The default is to create .ana in the current directory.
+       This cache file is used to complete processing in two stages.
+
+
+TXT;
+  exit(0);
+}
 
 if (isset($opt['svn-dump'])) {
   $svn_dump_file = $opt['svn-dump'];
 }
 if ($svn_dump_file === null || !file_exists($svn_dump_file)) {
   echo "FATAL: you must specify --svn-dump /path/to/dump\n";
+  echo "FATAL: use --help to show usage options\n";
   exit(1);
 }
 if (isset($opt['git-repo'])) {
@@ -108,7 +273,7 @@ $AUTHOR_MAP = array();
 
 if (isset($opt['authors'])) {
   $authors_file = $opt['authors'];
-  foreach ($authors_file as $line) {
+  foreach (file($authors_file) as $line) {
     if (preg_match("/^\s*(\S+)\s*=\s*(.*)\s*$/", $line, $M)) {
       $AUTHOR_MAP[$M[1]] = $M[2];
     }
