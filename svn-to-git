@@ -260,6 +260,8 @@ if (isset($opt['svn-dump'])) {
 if ($svn_dump_file === null || !file_exists($svn_dump_file)) {
   echo "FATAL: you must specify --svn-dump /path/to/dump\n";
   echo "FATAL: use --help to show usage options\n";
+  echo "FATAL: note that 32-bit versions of PHP may not be able\n";
+  echo "FATAL: to see dump files that are larger than 2GB in size\n";
   exit(1);
 }
 if (isset($opt['git-repo'])) {
@@ -501,7 +503,37 @@ TXT;
         }
       }
     }
+    $included_branches = array();
+    $included_tags = array();
+    $excluded_branches = array();
+    $excluded_tags = array();
+    foreach ($S->branches as $b) {
+      if ($b->include) {
+        if ($b->is_tag) {
+          $included_tags[] = $b->name;
+        } else {
+          $included_branches[] = $b->name;
+        }
+      } else if ($b->is_tag) {
+        $excluded_tags[] = $b->name;
+      } else {
+        $excluded_branches[] = $b->name;
+      }
+    }
   }
+  asort($included_branches);
+  asort($included_tags);
+  asort($excluded_branches);
+  asort($excluded_tags);
+  echo "NOTICE: Will include the following branches:\n";
+  echo "  " . join("\n  ", $included_branches) . "\n";
+  echo "NOTICE: Will include the following tags:\n";
+  echo "  " . join("\n  ", $included_tags) . "\n";
+  echo "NOTICE: Will exclude the following branches:\n";
+  echo "  " . join("\n  ", $excluded_branches) . "\n";
+  echo "NOTICE: Will exclude the following tags:\n";
+  echo "  " . join("\n  ", $excluded_tags) . "\n";
+
   echo "DEBUG: serialize analysis\n";
 
   $unmapped = false;
@@ -673,6 +705,9 @@ while ($climit === null || $climit--) {
     if ($b === null) {
       continue;
     }
+    if (!$b->include) {
+      continue;
+    }
     if (!isset($affected_branches[$b->name])) {
       $affected_branches[$b->name] = $b;
       $node_by_branch[$b->name] = array();
@@ -752,6 +787,56 @@ while ($climit === null || $climit--) {
             } elseif ($node->action == 'change') {
               /* property only change */
               break;
+            }
+            /* let's go looking for a node in the dump that has the text */
+            $sb = find_branch($node->meta['node-copyfrom-path']);
+            if ($sb) {
+              $spath = $node->meta['node-copyfrom-path'];
+              $mid = null;
+              for ($srev = $node->meta['node-copyfrom-rev']; $srev > 0; $srev--)
+              {
+                if (!isset($sb->activity_by_path[$spath][$srev])) {
+                  continue;
+                }
+                if (!$R->getByRev($srev)) {
+                  echo "couldn't seek to rev $srev\n";
+                  break;
+                }
+                foreach ($R->nodes as $snode) {
+                  if ($snode->path != $spath) {
+                    continue;
+                  }
+                  if ($snode->sha1 === null) {
+                    // FIXME: recursively follow copies
+                    echo "FIXME: recursive follow\n";
+                    echo "FIXME: workaround this by using --branch instead of --exclude-branch for $spath\n";
+                    var_dump($snode);
+                    break;
+                  }
+                  if (isset($mark_cache["sha1:$snode->sha1"])) {
+                    $mid = $mark_cache["sha1:$snode->sha1"];
+                  } else {
+                    $mid = $nextmark++;
+                    $mark_cache["sha1:$snode->sha1"] = $mid;
+                    fwrite($exp, "# mark for $snode->path $snode->sha1 $mid\n");
+                    if ($dummy_blobs) {
+                      fprintf($exp, "blob\nmark :%d\ndata 0\n", $mid);
+                    } else {
+                      fprintf($exp, "blob\nmark :%d\ndata %d\n", $mid,
+                        $snode->size);
+                      $snode->streamText($R, $exp);
+                    }
+                    fwrite($exp, "\n");
+                  }
+                  $mark_cache["file:$rev@$node->path"] = $mid;
+                  break;
+                }
+              }
+              // re-sync back to current revision
+              $R->getByRev($rev);
+              if ($mid !== null) {
+                break;
+              }
             }
             echo "Don't know how to get at text for node:\n";
             var_dump($node);
@@ -861,7 +946,7 @@ while ($climit === null || $climit--) {
       fprintf($exp, "from :%d\n", $b->origin->last_mark);
     }
 
-    if (preg_match("/(?:merge|revert)/", $R->revprops['svn:log']) &&
+    if (preg_match("/(?:merge|revert)/i", $R->revprops['svn:log']) &&
         preg_match_all("/(?:^|\s|,)(\[\d+\]|r\d+|\d+)(?:,|\s|$)/sm",
           $R->revprops['svn:log'], $M)) {
       foreach ($M[1] as $mrev) {
