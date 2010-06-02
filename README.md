@@ -36,7 +36,7 @@ want, and then complete the run when you're happy.
 
 ### Analysis ###
 
-   ./svn-to-git --svn-dump my.dump --analyze
+    ./svn-to-git --svn-dump my.dump --analyze
 
 This will examine your repo and tell what it's going to do.  It may ask you
 to add --branch or --exclude-branch hints and re-run.
@@ -45,7 +45,7 @@ to add --branch or --exclude-branch hints and re-run.
 
 Once you're happy with the plan, you can run it to completion:
 
-   ./svn-to-git --svn-dump my.dump --complete --git-repo /path/to/target/git
+    ./svn-to-git --svn-dump my.dump --complete --git-repo /path/to/target/git
 
 You'll almost certainly want to use the --authors option to set up an
 author map.
