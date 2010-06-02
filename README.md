@@ -41,6 +41,8 @@ want, and then complete the run when you're happy.
 This will examine your repo and tell what it's going to do.  It may ask you
 to add --branch or --exclude-branch hints and re-run.
 
+### Completion ###
+
 Once you're happy with the plan, you can run it to completion:
 
    ./svn-to-git --svn-dump my.dump --complete --git-repo /path/to/target/git
