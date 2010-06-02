@@ -23,10 +23,23 @@ class Branch {
     if (strpos($this->name, '/tags/') || !strncmp($this->name, 'tags/', 5)) {
       $this->is_tag = true;
     }
-    $this->bname = preg_replace("/^(tags|branches)\//", '', $this->name);
     global $mainline_branch;
-    if ($this->bname == $mainline_branch) {
+    global $branch_rewrite_rules;
+
+    if ($this->name == $mainline_branch) {
       $this->bname = 'master';
+    } else {
+      foreach ($branch_rewrite_rules as $search => $replace) {
+        $res = preg_replace($search, $replace, $this->name);
+        if ($this->name !== $res) {
+          $this->bname = $res;
+          break;
+        }
+      }
+
+      if ($this->bname === null) {
+        $this->bname = preg_replace("/^(tags|branches)\//", '', $this->name);
+      }
     }
   }
 

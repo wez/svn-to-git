@@ -64,6 +64,11 @@ $limit = null;
 /* branches to follow */
 $follow = array();
 
+/* branch name rewrite rules; each entry is of the form:
+ * /pattern/replacement/
+ */
+$branch_rewrite_rules = array();
+
 /* path to file containing author information */
 $authors_file = null;
 
@@ -91,6 +96,7 @@ $opt = getopt(
     "exclude-branch:",
     "authors:",
     "annotate-commit",
+    "rewrite-branch-name:",
     "help",
   )
 );
@@ -229,6 +235,13 @@ Less Common Options:
        When specified, the commit log provided to Git will be annotated
        with the origin subversion changeset number.
 
+  --rewrite-branch-name @^branches/(.*)$@$1@
+
+       When the branch name is computed, the base behavior is to strip off
+       a prefix of "branches/", which works well for the default repo layout.
+       If you have more complex layouts, you may specify any number of
+       replacement patterns to use.
+
 Rare Options:
 
   --git-mark-file git.marks
@@ -326,6 +339,23 @@ if (isset($opt['branch'])) {
     }
   } else {
     $follow[$opt['branch']] = true;
+  }
+}
+if (isset($opt['rewrite-branch-name'])) {
+  if (is_array($opt['rewrite-branch-name'])) {
+    foreach ($opt['rewrite-branch-name'] as $b) {
+      $rules[] = $b;
+    }
+  } else {
+    $rules[] = $opt['rewrite-branch-name'];
+  }
+  foreach ($rules as $rule) {
+    $delim = $rule[0];
+    list($empty, $search, $replace, $options) = explode($delim, $rule);
+
+    $search = $delim . $search . $delim . $options;
+
+    $branch_rewrite_rules[$search] = $replace;
   }
 }
 if (isset($opt['exclude-branch'])) {
@@ -509,22 +539,22 @@ TXT;
   foreach ($S->branches as $b) {
     if ($b->include) {
       if ($b->is_tag) {
-        $included_tags[] = $b->name;
+        $included_tags[] = "$b->name ($b->bname)";
       } else {
-        $included_branches[] = $b->name;
+        $included_branches[] = "$b->name ($b->bname)";
       }
     } else if ($b->is_tag) {
-      $excluded_tags[] = $b->name;
+      $excluded_tags[] = "$b->name ($b->bname)";
     } else {
-      $excluded_branches[] = $b->name;
+      $excluded_branches[] = "$b->name ($b->bname)";
     }
   }
   foreach ($S->dead_branches as $bname => $bdata) {
     foreach ($bdata as $b) {
       if ($b->is_tag) {
-        $dead_tags[] = $b->bname;
+        $dead_tags[] = "$b->name ($b->bname)";
       } else {
-        $dead_branches[] = $b->bname;
+        $dead_branches[] = "$b->name ($b->bname)";
       }
     }
   }
