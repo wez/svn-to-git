@@ -270,6 +270,14 @@ if ($svn_dump_file === null || !file_exists($svn_dump_file)) {
 }
 if (isset($opt['git-repo'])) {
   $target_git_repo_location = $opt['git-repo'];
+  if (!is_dir($target_git_repo_location)) {
+    echo "FATAL: git-repo $target_git_repo_location is not a directory\n";
+    exit(1);
+  }
+  if (!is_dir("$target_git_repo_location/.git")) {
+    echo "FATAL: git-repo $target_git_repo_location/.git is not a directory\n";
+    exit(1);
+  }
 }
 if (isset($opt['git-dump-file'])) {
   $target_git_dump_file = $opt['git-dump-file'];
