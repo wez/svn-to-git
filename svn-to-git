@@ -444,11 +444,6 @@ if ($mode === null || $mode == 'ANALYZE') {
             $b->include = $ob->include;
             continue;
           }
-          if (preg_match('/ec_cluster/', $node->path)) {
-             echo "Unknown origin\n";
-             var_dump($node);
-             exit;
-          }
         }
 
         /* otherwise, uninteresting; ignore it */
