@@ -1016,7 +1016,7 @@ while ($climit === null || $climit--) {
       }
     }
 
-    if (preg_match("/(?:merge|revert|take)/i", $R->revprops['svn:log']) &&
+    if (preg_match("/(?:merge|take)/i", $R->revprops['svn:log']) &&
         preg_match_all("/(?:^|\s|,)(\[\d+\]|r\d+|\d+)(?:,|\s|$)/sm",
           $R->revprops['svn:log'], $M)) {
       foreach ($M[1] as $mrev) {
