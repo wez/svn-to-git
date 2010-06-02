@@ -7,6 +7,7 @@
 class SvnDumpNode {
   /** location within the repo */
   public $path;
+  public $revision;
 
   /** the type of node: 'dir', 'file' */
   public $kind;
@@ -176,6 +177,7 @@ class SvnDumpReader {
         $here = ftell($this->fp);
 
         $node = new SvnDumpNode;
+        $node->revision = $this->revision;
         $node->meta = $k;
         $node->path = $k['node-path'];
         $node->kind = $k['node-kind'];

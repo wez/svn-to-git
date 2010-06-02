@@ -5,6 +5,10 @@
  * License: Modified BSD, See LICENSE file.
  */
 
+/* if true, create branches for impure tags, otherwise activity
+ * will be tracked in a fixup branch */
+$branch_for_impure_tags = false;
+
 /* if true, generate empty blobs in the target repo; makes it
  * faster to test and verify */
 $dummy_blobs = false;
@@ -350,9 +354,8 @@ include 'util.php';
 date_default_timezone_set('America/New_York');
 
 if ($mode === null || $mode == 'ANALYZE') {
-  $S = new StdClass;
+  $S = new Repo;
   $S->limit = $limit;
-  $S->branches = array();
 } else {
   $S = unserialize(file_get_contents($analyze_cache));
 
@@ -374,21 +377,6 @@ function is_child_of($candidate, $parent)
     }
   }
   return false;
-}
-
-function find_branch($b)
-{
-  global $S;
-
-  $path = $b;
-  while (strlen($path)) {
-    if (isset($S->branches[$path])) {
-      return $S->branches[$path];
-    }
-    $path = dirname($path);
-    if ($path == '.') break;
-  }
-  return null;
 }
 
 function is_excluded($name)
@@ -419,21 +407,19 @@ if ($mode === null || $mode == 'ANALYZE') {
     echo "DEBUG: ", $R->revision, " $log\n";
     foreach ($R->nodes as $node) {
 #    echo "  $node->path\n";
-      $b = find_branch($node->path);
+      $b = $S->find_branch($node);
 
       if ($b === null) {
         /* branch not found */
         if (is_child_of($node->path, $mainline_branch)) {
           /* create trunk */
-          $b = new Branch($R->revision, $node->path);
-          $S->branches[$b->name] = $b;
+          $b = $S->add_branch($node);
           continue;
         }
         foreach ($follow as $candidate => $include) {
           if (is_child_of($node->path, $candidate)) {
-            $b = new Branch($R->revision, $node->path);
+            $b = $S->add_branch($node);
             $b->include = $include;
-            $S->branches[$b->name] = $b;
             break;
           }
         }
@@ -443,7 +429,9 @@ if ($mode === null || $mode == 'ANALYZE') {
 
         /* is this the creation of an interesting branch? */
         if (isset($node->meta['node-copyfrom-path'])) {
-          $ob = find_branch($node->meta['node-copyfrom-path']);
+          $ob = $S->find_branch(
+                    $node->meta['node-copyfrom-path'],
+                    $node->meta['node-copyfrom-rev']);
 
           if ($ob) {
             if ($node->kind == 'file') {
@@ -451,17 +439,16 @@ if ($mode === null || $mode == 'ANALYZE') {
             } else {
               $name = $node->path;
             }
-            $b = new Branch($R->revision, $name);
+            $b = $S->add_branch($name, $R->revision);
             $b->origin = $ob;
             $b->include = $ob->include;
-            $S->branches[$b->name] = $b;
             continue;
           }
-          /*
+          if (preg_match('/ec_cluster/', $node->path)) {
              echo "Unknown origin\n";
              var_dump($node);
              exit;
-           */
+          }
         }
 
         /* otherwise, uninteresting; ignore it */
@@ -469,9 +456,15 @@ if ($mode === null || $mode == 'ANALYZE') {
         /* record activity against this revision */
         $b->addActivity($R);
 
+        if ($node->action == 'delete' && $node->path == $b->name) {
+          $S->delete_branch($b, $node->revision);
+        }
+
         /* check for copy in */
         if (isset($node->meta['node-copyfrom-path'])) {
-          $ob = find_branch($node->meta['node-copyfrom-path']);
+          $ob = $S->find_branch(
+                  $node->meta['node-copyfrom-path'],
+                  $node->meta['node-copyfrom-rev']);
           if ($ob === null) {
             $src = $node->meta['node-copyfrom-path'];
             $dest = $node->path;
@@ -503,21 +496,32 @@ TXT;
         }
       }
     }
-    $included_branches = array();
-    $included_tags = array();
-    $excluded_branches = array();
-    $excluded_tags = array();
-    foreach ($S->branches as $b) {
-      if ($b->include) {
-        if ($b->is_tag) {
-          $included_tags[] = $b->name;
-        } else {
-          $included_branches[] = $b->name;
-        }
-      } else if ($b->is_tag) {
-        $excluded_tags[] = $b->name;
+  }
+  $included_branches = array();
+  $included_tags = array();
+  $excluded_branches = array();
+  $excluded_tags = array();
+  $dead_branches = array();
+  $dead_tags = array();
+  foreach ($S->branches as $b) {
+    if ($b->include) {
+      if ($b->is_tag) {
+        $included_tags[] = $b->name;
       } else {
-        $excluded_branches[] = $b->name;
+        $included_branches[] = $b->name;
+      }
+    } else if ($b->is_tag) {
+      $excluded_tags[] = $b->name;
+    } else {
+      $excluded_branches[] = $b->name;
+    }
+  }
+  foreach ($S->dead_branches as $bname => $bdata) {
+    foreach ($bdata as $b) {
+      if ($b->is_tag) {
+        $dead_tags[] = $b->bname;
+      } else {
+        $dead_branches[] = $b->bname;
       }
     }
   }
@@ -525,6 +529,8 @@ TXT;
   asort($included_tags);
   asort($excluded_branches);
   asort($excluded_tags);
+  asort($dead_branches);
+  asort($dead_tags);
   echo "NOTICE: Will include the following branches:\n";
   echo "  " . join("\n  ", $included_branches) . "\n";
   echo "NOTICE: Will include the following tags:\n";
@@ -533,6 +539,10 @@ TXT;
   echo "  " . join("\n  ", $excluded_branches) . "\n";
   echo "NOTICE: Will exclude the following tags:\n";
   echo "  " . join("\n  ", $excluded_tags) . "\n";
+  echo "NOTICE: tracking commits from the following dead branches:\n";
+  echo "  " . join("\n  ", $dead_branches) . "\n";
+  echo "NOTICE: tracking commits from the following dead tags:\n";
+  echo "  " . join("\n  ", $dead_tags) . "\n";
 
   echo "DEBUG: serialize analysis\n";
 
@@ -629,6 +639,7 @@ function parse_mergeinfo_props($minfo)
 function diff_mergeinfo_props(SvnDumpNode $node)
 {
   global $mergeprops_by_path;
+  global $S;
 
   $new = array();
 
@@ -662,8 +673,9 @@ function diff_mergeinfo_props(SvnDumpNode $node)
 
   foreach ($new as $path => $revdata) {
     // svn tracks mergeinfo paths with a leading slash; fixup
-    $b = find_branch(ltrim($path, '/'));
+    $bpath = ltrim($path, '/');
     foreach ($revdata as $rev) {
+      $b = $S->find_branch($bpath, $rev);
       $s = new stdclass;
       $s->branch = $b->name;
       $s->rev = $rev;
@@ -689,6 +701,7 @@ function map_author($name)
 }
 
 echo "NOTICE: Generating Git export file\n";
+$TAG_FIXUP = array();
 $climit = $limit;
 while ($climit === null || $climit--) {
   if (!$R->next()) {
@@ -699,9 +712,11 @@ while ($climit === null || $climit--) {
   /* is this commit one our interesting commits? */
   $affected_branches = array();
   $node_by_branch = array();
+  $local_branch_by_name = array();
 
   foreach ($R->nodes as $node) {
-    $b = find_branch($node->path);
+    $b = $S->find_branch($node);
+    $local_branch_by_name[$b->name] = $b;
     if ($b === null) {
       continue;
     }
@@ -729,7 +744,7 @@ while ($climit === null || $climit--) {
   echo "[$rev]\n";
 
   foreach ($node_by_branch as $bname => $nodes) {
-    $b = $S->branches[$bname];
+    $b = $local_branch_by_name[$bname];
 //    var_dump($nodes);
 
     $merge_sources = array();
@@ -765,7 +780,7 @@ while ($climit === null || $climit--) {
               $crev = $node->meta['node-copyfrom-rev'];
               $cpath = $node->meta['node-copyfrom-path'];
 
-              $cb = find_branch($cpath);
+              $cb = $S->find_branch($cpath, $crev);
               if ($cb && isset($mark_cache["commit-$cb->name-$crev"])) {
                 $mid = $mark_cache["commit-$cb->name-$crev"];
                 $merge_sources[$mid] = $mid;
@@ -791,7 +806,9 @@ while ($climit === null || $climit--) {
               break;
             }
             /* let's go looking for a node in the dump that has the text */
-            $sb = find_branch($node->meta['node-copyfrom-path']);
+            $sb = $S->find_branch(
+                    $node->meta['node-copyfrom-path'],
+                    $node->meta['node-copyfrom-rev']);
             if ($sb) {
               $spath = $node->meta['node-copyfrom-path'];
               $mid = null;
@@ -842,6 +859,7 @@ while ($climit === null || $climit--) {
             }
             echo "Don't know how to get at text for node:\n";
             var_dump($node);
+            echo "sb is $sb\n";
             exit;
           }
           if (isset($mark_cache["sha1:$node->sha1"])) {
@@ -878,12 +896,9 @@ while ($climit === null || $climit--) {
       $log = "(svn: [$rev] on $b->name : $b->bname)\n" . $log;
     }
 
-    $create_tag = false;
-
-    if ($b->is_tag && $b->is_pure && $b->createdrev == $rev) {
-      if (!$b->include) {
-        continue;
-      }
+    /* don't bother recording a tag if it is deleted */
+    if ($b->include && $b->is_tag && $b->is_pure && $b->createdrev == $rev &&
+        $b->deleted === null) {
       if (count($nodes) != 1) {
         var_dump($nodes);
         throw new Exception("too many nodes for a pure tag!");
@@ -937,23 +952,16 @@ while ($climit === null || $climit--) {
      * This is made more complicated by the possibility for one svn
      * commit to both delete and create in the same commit */
 
-    $do_delete_all = false;
     $commit_source = null;
 
     foreach ($nodes as $node) {
       if (is_excluded($node->path)) continue;
       if ($node->path == $b->name) {
-        if ($node->action == 'delete') {
-          $do_delete_all = true;
-          $b->deleted = $rev;
-          continue;
-        }
-
         if ($node->action == 'add') {
           if (isset($node->meta['node-copyfrom-path'])) {
             $spath = $node->meta['node-copyfrom-path'];
             $srev = $node->meta['node-copyfrom-rev'];
-            $sb = find_branch($spath);
+            $sb = $S->find_branch($spath, $srev);
             if (!$sb) {
               echo "FATAL: could not locate source branch $spath @ $srev\n";
               echo "FATAL: while recreating $b->name @ $rev\n";
@@ -978,23 +986,16 @@ while ($climit === null || $climit--) {
             }
           }
         }
-
-        if ($b->deleted !== null) {
-          if ($node->action == 'add') {
-            fprintf($exp, "reset refs/heads/$b->bname\n");
-            $b->deleted = null;
-            $do_delete_all = false;
-            continue;
-          }
-
-          var_dump($node);
-          echo "Deleted in $b->deleted\n";
-          exit;
-        }
       }
     }
 
-    fprintf($exp, "commit refs/heads/$b->bname\n");
+    if ($b->deleted !== null ||
+        ($b->is_tag && !$b->is_pure && !$branch_for_impure_tags)) {
+      $TAG_FIXUP[$b->bname] = $b->bname;
+      fprintf($exp, "commit TAG_FIXUP/$b->bname\n");
+    } else {
+      fprintf($exp, "commit refs/heads/$b->bname\n");
+    }
     $mid = $nextmark++;
     $mark_cache["commit-$b->name-$rev"] = $mid;
     $mark_cache["commitbyrev-$rev"] = $mid;
@@ -1048,13 +1049,7 @@ while ($climit === null || $climit--) {
       }
       if ($node->action == 'delete') {
         if ($node->path == $b->name) {
-          if (!$do_delete_all) {
-            continue;
-          }
-          fprintf($exp, "deleteall\n");
-          echo "Treating as deleteall:\n";
-          var_dump($nodes);
-          $b->deleted = $rev;
+          continue;
         } else {
           fprintf($exp, "D %s\n", $b->fixpath($node->path));
         }
@@ -1082,7 +1077,7 @@ while ($climit === null || $climit--) {
       echo "What to do?\n";
       exit;
     }
-    if ($b->is_tag && $b->include) {
+    if ($b->is_tag && $b->include && $b->deleted === null) {
       /* if we get here, check to see if we should create the tag.
        * We must be an impure tag.  We only create impure tags at the point
        * of last activity */
@@ -1100,9 +1095,34 @@ while ($climit === null || $climit--) {
   }
 }
 
+function rmdir_r($path)
+{
+  if (is_dir($path)) {
+    $d = opendir($path);
+    while (($file = readdir($d)) !== false) {
+      if ($file == '.' || $file == '..') {
+        continue;
+      }
+      $file = "$path/$file";
+      if (is_dir($file)) {
+        rmdir_r($file);
+      } else {
+        unlink($file);
+      }
+    }
+    rmdir($path);
+  } else {
+    unlink($path);
+  }
+}
+
 fclose($exp);
 if (is_resource($GIT_FAST_IMPORT)) {
   proc_close($GIT_FAST_IMPORT);
+  /* prune out fixup namespace */
+  if (count($TAG_FIXUP)) {
+    rmdir_r($target_git_repo_location . "/.git/TAG_FIXUP");
+  }
   $GM = array();
   foreach (file($git_mark_file) as $line) {
     if (preg_match("/^:(\d+)\s+([a-f0-9]+)\s*$/", $line, $M)) {
