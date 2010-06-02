@@ -1,4 +1,57 @@
+svn-to-git
+==========
+
 A Subversion to Git migration tool for repositories with complex layouts.
+
+By complex layouts, I mean:
+
+1.  You have multi-level tags and branches like tags/2.0/2.0.1 and
+    branches/2.2/2.2.1
+
+2.  You have multiple sub-projects in your repo and have copied code
+    from other areas of the repo into your project of interest.
+
+3.  You may have, at some point, checked in code against a tag.
+
+Installation
+------------
+
+You need:
+
+1.  PHP 5.2 or later, preferably a 64-bit build, as 32-bit PHP cannot seek
+    around in Subversion dump files larger than 2GB in size.
+
+2.  A Subversion repository dumped via "svnadmin dump"
+
+3.  Enough disk space; potentially up to 3 time the size of the dump file,
+    depending on how much of the repo you want to pull into Git.
+
+Operation
+---------
+
+For help, run svn-to-git --help.
+
+You'll typically run in two stages; analysis while you figure out what you
+want, and then complete the run when you're happy.
+
+### Analysis ###
+
+   ./svn-to-git --svn-dump my.dump --analyze
+
+This will examine your repo and tell what it's going to do.  It may ask you
+to add --branch or --exclude-branch hints and re-run.
+
+Once you're happy with the plan, you can run it to completion:
+
+   ./svn-to-git --svn-dump my.dump --complete --git-repo /path/to/target/git
+
+You'll almost certainly want to use the --authors option to set up an
+author map.
+
+Check out the --help output for more information.
+
+Background Information
+======================
 
 Subversion has a somewhat strange notion of branches.  People (or perhaps just
 us) abuse or extend the branches/branchname and tags/tagname convention and use
