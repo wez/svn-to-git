@@ -902,16 +902,10 @@ while ($climit === null || $climit--) {
     /* don't bother recording a tag if it is deleted */
     if ($b->include && $b->is_tag && $b->is_pure && $b->createdrev == $rev &&
         $b->deleted === null) {
-      if (count($nodes) != 1) {
-        var_dump($nodes);
-        throw new Exception("too many nodes for a pure tag!");
-      }
-      list($node) = $nodes;
-      if ($node->action != 'add' ||
-          $node->kind != 'dir' ||
-          $node->path != $b->name) {
-        var_dump($node);
-        throw new Exception("wrong kind of node for a pure tag!");
+      foreach ($nodes as $node) {
+        if ($node->action == 'add' && $node->path == $b->name) {
+          break;
+        }
       }
 
       if ($node->meta['node-copyfrom-path'] !=
@@ -1003,8 +997,8 @@ while ($climit === null || $climit--) {
     $mark_cache["commit-$b->name-$rev"] = $mid;
     $mark_cache["commitbyrev-$rev"] = $mid;
     fwrite($exp, "# mark for commit $b->name [$rev] $mid\n");
-    $b->last_mark = $mid;
     fprintf($exp, "mark :%d\n", $mid);
+    $future_last_mark = $mid;
 
     fprintf($exp,
       "committer $author $when -0000\n");
@@ -1038,12 +1032,12 @@ while ($climit === null || $climit--) {
       }
     }
 
-    $last_mid = $mark_cache["commitbyrev-" . ($rev-1)];
     foreach ($merge_sources as $merge_mark) {
-      if ($merge_mark !== $last_mid) {
+      if ($merge_mark !== $b->last_mark) {
         fprintf($exp, "merge :%d\n", $merge_mark);
       }
     }
+    $b->last_mark = $future_last_mark;
 
     foreach ($nodes as $node) {
       if (is_excluded($node->path)) continue;
