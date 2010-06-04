@@ -43,6 +43,19 @@ class Branch {
     }
   }
 
+  function existsInRev($path, $rev) {
+    if (isset($this->activity_by_path[$path])) {
+      $list = $this->activity_by_path[$path];
+      while ($rev) {
+        if (isset($list[$rev])) {
+          return $list[$rev];
+        }
+        $rev--;
+      }
+    }
+    return false;
+  }
+
   function fixpath($str) {
     $res = substr($str, strlen($this->name) + 1);
 
@@ -56,14 +69,15 @@ class Branch {
     $this->activity[$R->revision] = $R->revision;
     foreach ($R->nodes as $node) {
       if (is_child_of($node->path, $this->name)) {
-        $this->activity_by_path[$node->path][$R->revision] = $R->revision;
         switch ($node->action) {
           case 'add':
           case 'change':
           case 'replace':
             $this->is_pure = false;
+            $this->activity_by_path[$node->path][$R->revision] = true;
             break;
           case 'delete':
+            $this->activity_by_path[$node->path][$R->revision] = false;
             if ($node->path != $this->name) {
               $this->is_pure = false;
             }

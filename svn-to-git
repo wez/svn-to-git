@@ -179,7 +179,7 @@ Common Options:
        tracked during the import.  It does cause the import to ignore
        activity on excluded branches that is not directly related
        to the mainline, however.
-       
+
        --exclude-branch can be used multiple times.
 
 Less Common Options:
@@ -445,7 +445,32 @@ if ($mode === null || $mode == 'ANALYZE') {
     echo "DEBUG: ", $R->revision, " $log\n";
     foreach ($R->nodes as $node) {
 #    echo "  $node->path\n";
+
+      /* Here's a fun case; the repo has a dir named "foo" which
+       * we are treating as the trunk for a branched project.
+       * Subsequently, we want to add tags and branches off this area
+       * so there is activity to do so.  This means that we want to
+       * end up with "foo/trunk" etc., but since we have established
+       * "foo" as a branch, find_branch is always going to return return
+       * "foo" for us instead of treating "foo/trunk" as the intended
+       * branch.
+       * So what we do here is recognize dir creation activity and validate
+       * that the returned branch exactly matches; if it does not, we
+       * fall through to check the follow list */
+
       $b = $S->find_branch($node);
+
+      if ($b && $node->kind == 'dir' && $node->action == 'add' &&
+          $node->path != $b->path) {
+        foreach ($follow as $candidate => $include) {
+          if ($include && $candidate == $node->path) {
+            /* use this as the branch instead */
+            $b = $S->add_branch($node);
+            $b->include = $include;
+            break;
+          }
+        }
+      }
 
       if ($b === null) {
         /* branch not found */
@@ -536,7 +561,14 @@ TXT;
   $excluded_tags = array();
   $dead_branches = array();
   $dead_tags = array();
+  $all_bnames = array();
+  $collision = false;
   foreach ($S->branches as $b) {
+    if (isset($all_bnames[$b->bname])) {
+      echo "FATAL: colliding branch $b\n";
+      $collision = true;
+    }
+    $all_bnames[$b->bname] = $b->bname;
     if ($b->include) {
       if ($b->is_tag) {
         $included_tags[] = "$b->name ($b->bname)";
@@ -549,6 +581,16 @@ TXT;
       $excluded_branches[] = "$b->name ($b->bname)";
     }
   }
+  /* quadratic collision test */
+  foreach ($all_bnames as $bname) {
+    foreach ($all_bnames as $other) {
+      if ($other == $bname) continue;
+      if (is_child_of($other, $bname)) {
+        echo "FATAL: collision between $bname and $other\n";
+        $collision = true;
+      }
+    }
+  }
   foreach ($S->dead_branches as $bname => $bdata) {
     foreach ($bdata as $b) {
       if ($b->is_tag) {
@@ -557,6 +599,14 @@ TXT;
         $dead_branches[] = "$b->name ($b->bname)";
       }
     }
+  }
+  if ($collision) {
+    echo "FATAL: colliding branches detected, this will result in missing\n";
+    echo "FATAL: branches in the target Git repository.\n";
+    echo "FATAL: you may use --rewrite-branch-name to correct this,\n";
+    echo "FATAL: by renaming a branch so that it does not fall as a sub-dir\n";
+    echo "FATAL: of the other branch.\n";
+    exit(1);
   }
   asort($included_branches);
   asort($included_tags);
@@ -781,6 +831,7 @@ while ($climit === null || $climit--) {
 //    var_dump($nodes);
 
     $merge_sources = array();
+    $offset_branch = null;
 
     /* first pass through to mark any blobs we're putting in */
     foreach ($nodes as $node) {
@@ -1071,6 +1122,73 @@ while ($climit === null || $climit--) {
 
     foreach ($nodes as $node) {
       if (is_excluded($node->path)) continue;
+
+      if ($node->kind == 'dir' && $node->action == 'add' &&
+          isset($node->meta['node-copyfrom-path'])) {
+        $crev = $node->meta['node-copyfrom-rev'];
+        $cpath = $node->meta['node-copyfrom-path'];
+
+        $cb = $S->find_branch($cpath, $crev);
+        if ($cb && $b->createdrev == $rev) {
+          if ($cb->name == $cpath) {
+            $offset_branch = false;
+          } else if ($offset_branch === null) {
+            /* This case triggers when a branch is created by copying
+             * a sub-directory out of an existing branch and using that
+             * as the basis for the new branch.
+             * There are two ways to model this operation:
+             * 1. create an empty branch and populate every file individually
+             * 2. create a branch and then move files around to match
+             * The latter is preferable (and the only one available to execute
+             * at this location in the code!).  In both cases, we need to be
+             * able to determine the list of files in the source dir so that
+             * we can eliminate everything but the origin dir. */
+//            var_dump($nodes);
+//            echo "$b\n";
+//            echo "$cb\n";
+//            echo "$cb->name vs $cpath\n";
+
+            $origin_base = dirname($cpath);
+            foreach ($cb->activity_by_path as $apath => $alist) {
+              /* if we're alive, we want to delete it! */
+              if ($cb->existsInRev($apath, $node->revision) &&
+                  $apath != $cpath &&
+                  dirname($apath) == $origin_base) {
+                fprintf($exp, "D %s\n", $cb->fixpath($apath));
+                $b->activity_by_path[$apath][$node->revision] = false;
+              }
+            }
+
+            /* phase two is that we need to rename files up to the top level */
+            $move_list = array();
+            foreach ($cb->activity_by_path as $apath => $alist) {
+              if (end($alist) && $apath != $cpath &&
+                  is_child_of($apath, $cpath)) {
+                $p = substr($apath, strlen($cpath) + 1);
+                $b->activity_by_path[$p][$node->revision] = true;
+                preg_match("@^([^/]+)(/.*)?$@", $p, $M);
+                $p = $M[1];
+                $move_list[$p] = $p;
+              }
+            }
+//            print_r($move_list);
+            $origin_dir = basename($cpath);
+            foreach ($move_list as $p) {
+              if ($origin_dir == $p) {
+                /* avoid colliding with the source dir; we'll do this one
+                 * last */
+                continue;
+              }
+              fprintf($exp, "R %s %s\n", $cb->fixpath($cpath . "/$p"), $p);
+            }
+            if (isset($move_list[$origin_dir])) {
+              printf($exp, "R %s %s\n",
+                $cb->fixpath($cpath . "/$origin_dir"), $origin_dir);
+            }
+          }
+        }
+      }
+
       if ($node->path == $b->name && $node->action == 'add') {
         continue;
       }
