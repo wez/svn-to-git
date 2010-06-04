@@ -13,9 +13,15 @@ class Branch {
   public $is_tag = false;
   public $is_pure = true;
   public $bname;
+
   /* record individual node paths modified against this branch so that
-   * we can later on figure out how to get at the content */
+   * we can later on figure out how to get at the content.
+   * [$path][$revision] = boolean; false means deleted */
   public $activity_by_path = array();
+
+  /* record props by path by revision.
+   * [$propname][$path][$revision] = $value */
+  public $props = array();
 
   function __construct($rev, $path) {
     $this->createdrev = $rev;
@@ -65,10 +71,34 @@ class Branch {
     return $res;
   }
 
+  function getPropsForRev($rev, $wantedprop) {
+    $props = array();
+    if (isset($this->props[$wantedprop])) {
+      foreach ($this->props[$wantedprop] as $path => $plist) {
+        $r = $rev;
+        while ($r) {
+          if (isset($plist[$r])) {
+            $props[$path] = $plist[$r];
+            if ($r < $rev) {
+              // carry forward to improve performance of next lookup
+              $this->props[$wantedprop][$path][$rev] = $plist[$r];
+            }
+            break;
+          }
+          $r--;
+        }
+      }
+    }
+    return $props;
+  }
+
   function addActivity(SvnDumpReader $R) {
     $this->activity[$R->revision] = $R->revision;
     foreach ($R->nodes as $node) {
       if (is_child_of($node->path, $this->name)) {
+        foreach ($node->props as $propname => $propval) {
+          $this->props[$propname][$node->path][$R->revision] = $propval;
+        }
         switch ($node->action) {
           case 'add':
           case 'change':

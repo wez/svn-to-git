@@ -76,6 +76,13 @@ $authors_file = null;
  * the original SVN commit */
 $annotate_commit = false;
 
+/* alias an URL to a path within the repo. This is used for handling
+ * svn:externals munging */
+$local_externals = array();
+
+/* if true, flatten local externals into the tree */
+$flatten_externals = false;
+
 $opt = getopt(
   '',
   array(
@@ -98,6 +105,7 @@ $opt = getopt(
     "annotate-commit",
     "rewrite-branch-name:",
     "help",
+    "local-external:",
   )
 );
 
@@ -242,6 +250,23 @@ Less Common Options:
        If you have more complex layouts, you may specify any number of
        replacement patterns to use.
 
+  --local-external http://my.host/repo
+
+       Advises svn-to-git that the specified URL is an alias for the SVN
+       repo being processed.  This is used in conjunction with the
+       --flatten-externals option.  --local-external may be specified
+       multiple times to define multiple aliases.
+
+  --flatten-externals
+
+       When specified, svn:externals that are defined as aliases for the
+       local repo will be flattened into the tree each time a branch is
+       tagged, and also at the end of repo processing.  For tags, this
+       means that a fixup branch will be created (FIXME: not yet implemented),
+       and for branches at the end of the repo processing, the source of
+       the external will be copied into the branch tree, effectively
+       eliminating the external from that point on.
+
 Rare Options:
 
   --git-mark-file git.marks
@@ -298,6 +323,18 @@ if (isset($opt['git-dump-file'])) {
 
 $AUTHOR_MAP = array();
 
+function arrayopt($name) {
+  global $opt;
+
+  if (!isset($opt[$name])) {
+    return array();
+  }
+  if (is_array($opt[$name])) {
+    return $opt[$name];
+  }
+  return array($opt[$name]);
+}
+
 if (isset($opt['authors'])) {
   $authors_file = $opt['authors'];
   foreach (file($authors_file) as $line) {
@@ -332,24 +369,17 @@ if (isset($opt['exclude-pattern'])) {
 if (isset($opt['limit'])) {
   $limit = (int)$opt['limit'];
 }
-if (isset($opt['branch'])) {
-  if (is_array($opt['branch'])) {
-    foreach ($opt['branch'] as $b) {
-      $follow[$b] = true;
-    }
-  } else {
-    $follow[$opt['branch']] = true;
-  }
+foreach (arrayopt('local-external') as $ext) {
+  $local_externals[$ext] = $ext;
+}
+foreach (arrayopt('branch') as $b) {
+  $follow[$b] = true;
+}
+foreach (arrayopt('exclude-branch') as $b) {
+  $follow[$b] = false;
 }
 if (isset($opt['rewrite-branch-name'])) {
-  if (is_array($opt['rewrite-branch-name'])) {
-    foreach ($opt['rewrite-branch-name'] as $b) {
-      $rules[] = $b;
-    }
-  } else {
-    $rules[] = $opt['rewrite-branch-name'];
-  }
-  foreach ($rules as $rule) {
+  foreach (arrayopt('rewrite-branch-name') as $rule) {
     $delim = $rule[0];
     list($empty, $search, $replace, $options) = explode($delim, $rule);
 
@@ -358,15 +388,8 @@ if (isset($opt['rewrite-branch-name'])) {
     $branch_rewrite_rules[$search] = $replace;
   }
 }
-if (isset($opt['exclude-branch'])) {
-  if (is_array($opt['exclude-branch'])) {
-    foreach ($opt['exclude-branch'] as $b) {
-      $follow[$b] = false;
-    }
-  } else {
-    $follow[$opt['exclude-branch']] = false;
-  }
-}
+
+$flatten_externals = isset($opt['flatten-externals']);
 $use_mergeinfo = isset($opt['use-mergeinfo']);
 $dummy_blobs = isset($opt['no-blobs']);
 $annotate_commit = isset($opt['annotate-commit']);
@@ -1188,7 +1211,12 @@ while ($climit === null || $climit--) {
           }
         }
       }
-
+      if (isset($node->props['svn:externals'])) {
+        $pval = $node->props['svn:externals'];
+        fprintf($exp, "M 100644 inline %s\ndata %d\n%s\n",
+          $b->fixpath($node->path . '/.svnexternals'),
+          strlen($pval), $pval);
+      }
       if ($node->path == $b->name && $node->action == 'add') {
         continue;
       }
@@ -1221,6 +1249,11 @@ while ($climit === null || $climit--) {
       var_dump($node);
       echo "What to do?\n";
       exit;
+    }
+    if (false)
+    foreach ($b->getPropsForRev($rev, 'svn:externals') as $path => $pval) {
+      fprintf($exp, "M 100644 inline .svnexternals\ndata %d\n%s\n",
+        strlen($pval), $pval);
     }
     if ($b->is_tag && $b->include && $b->deleted === null) {
       /* if we get here, check to see if we should create the tag.
