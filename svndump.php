@@ -16,7 +16,7 @@ class SvnDumpNode {
   public $action;
 
   /** properties of the node */
-  public $props = array();
+  public $props = null;
 
   /** misc metadata */
   public $meta;

@@ -4,6 +4,7 @@
  * Author: Wez Furlong
  * License: Modified BSD, See LICENSE file.
  */
+ini_set('memory_limit', -1);
 
 /* if true, create branches for impure tags, otherwise activity
  * will be tracked in a fixup branch */
@@ -80,8 +81,9 @@ $annotate_commit = false;
  * svn:externals munging */
 $local_externals = array();
 
-/* if true, flatten local externals into the tree */
-$flatten_externals = false;
+/* if true, flatten local externals into the tree.
+ * This is a list of branches that this should be applied to */
+$flatten_externals = array();
 
 $opt = getopt(
   '',
@@ -97,6 +99,7 @@ $opt = getopt(
     "svn-dump:",
     "cache:",
     "analyze",
+    "flatten-externals:",
     "complete",
     "limit:",
     "branch:",
@@ -257,11 +260,14 @@ Less Common Options:
        --flatten-externals option.  --local-external may be specified
        multiple times to define multiple aliases.
 
-  --flatten-externals
+  --flatten-externals trunk
 
-       When specified, svn:externals that are defined as aliases for the
-       local repo will be flattened into the tree each time a branch is
-       tagged, and also at the end of repo processing.  For tags, this
+       Use this multiple times to specify svn repository paths that are
+       to be subjected to externals flattening.
+
+       When enabled, svn:externals that are defined as aliases for the
+       local repo will be flattened into the tree each time the specified
+       branch is tagged, and also at the end of repo processing.  For tags, this
        means that a fixup branch will be created (FIXME: not yet implemented),
        and for branches at the end of the repo processing, the source of
        the external will be copied into the branch tree, effectively
@@ -389,7 +395,7 @@ if (isset($opt['rewrite-branch-name'])) {
   }
 }
 
-$flatten_externals = isset($opt['flatten-externals']);
+$flatten_externals = arrayopt('flatten-externals');
 $use_mergeinfo = isset($opt['use-mergeinfo']);
 $dummy_blobs = isset($opt['no-blobs']);
 $annotate_commit = isset($opt['annotate-commit']);
@@ -418,8 +424,11 @@ if ($mode === null || $mode == 'ANALYZE') {
   $S = new Repo;
   $S->limit = $limit;
 } else {
-  $S = unserialize(file_get_contents($analyze_cache));
+  echo "DEBUG: loading analysis\n";
+  echo "DEBUG: if this takes a long time, consider disabling the dump and\n";
+  echo "DEBUG: running in a single step\n";
 
+  $S = unserialize(file_get_contents($analyze_cache));
   if (($limit === null && $S->limit !== null) ||
       ($S->limit !== null && $limit > $S->limit)) {
     $limit = $S->limit;
@@ -460,6 +469,10 @@ if ($mode === null || $mode == 'ANALYZE') {
       echo "NOTICE: reached end of SVN data\n";
       break;
     }
+
+    // Build up a map of the complete tree by revision
+    $S->discover($R);
+
     if (isset($R->revprops['svn:author'])) {
       $authors[$R->revprops['svn:author']] = true;
     }
@@ -467,7 +480,6 @@ if ($mode === null || $mode == 'ANALYZE') {
     $log = substr($log, 0, 40);
     echo "DEBUG: ", $R->revision, " $log\n";
     foreach ($R->nodes as $node) {
-#    echo "  $node->path\n";
 
       /* Here's a fun case; the repo has a dir named "foo" which
        * we are treating as the trunk for a branched project.
@@ -487,6 +499,8 @@ if ($mode === null || $mode == 'ANALYZE') {
           $node->path != $b->path) {
         foreach ($follow as $candidate => $include) {
           if ($include && $candidate == $node->path) {
+            /* retire the old location */
+//            $S->delete_branch($b, $R->revision);
             /* use this as the branch instead */
             $b = $S->add_branch($node);
             $b->include = $include;
@@ -535,7 +549,7 @@ if ($mode === null || $mode == 'ANALYZE') {
         /* otherwise, uninteresting; ignore it */
       } else {
         /* record activity against this revision */
-        $b->addActivity($R);
+        $b->addActivity($R, $S);
 
         if ($node->action == 'delete' && $node->path == $b->name) {
           $S->delete_branch($b, $node->revision);
@@ -650,8 +664,6 @@ TXT;
   echo "NOTICE: tracking commits from the following dead tags:\n";
   echo "  " . join("\n  ", $dead_tags) . "\n";
 
-  echo "DEBUG: serialize analysis\n";
-
   $unmapped = false;
   foreach ($authors as $author => $dummy) {
     if (!isset($AUTHOR_MAP[$author])) {
@@ -663,10 +675,9 @@ TXT;
     echo "NOTICE: use the author file to supply mapping information\n";
     echo "NOTICE: format is:  svnusername = First Last <email@domain>\n";
   }
-
-  file_put_contents($analyze_cache, serialize($S));
-
   if ($mode == 'ANALYZE') {
+    echo "DEBUG: serialize analysis\n";
+    file_put_contents($analyze_cache, serialize($S));
     echo "NOTICE: stopping at analysis stage\n";
     exit(0);
   }
@@ -880,7 +891,8 @@ while ($climit === null || $climit--) {
         case 'add':
         case 'change':
         case 'replace':
-          if ($node->sha1 === null) {
+          $sha1 = $S->determine_sha1_for_node($node);
+          if ($sha1 === null) {
             if (isset($node->meta['node-copyfrom-rev']) &&
                 isset($node->meta['node-copyfrom-path'])) {
               /* dup a prior mark */
@@ -921,6 +933,7 @@ while ($climit === null || $climit--) {
               $mid = null;
               for ($srev = $node->meta['node-copyfrom-rev']; $srev > 0; $srev--)
               {
+          throw new Exception("fixme");
                 if (!isset($sb->activity_by_path[$spath][$srev])) {
                   continue;
                 }
@@ -969,20 +982,7 @@ while ($climit === null || $climit--) {
             echo "sb is $sb\n";
             exit;
           }
-          if (isset($mark_cache["sha1:$node->sha1"])) {
-            $mid = $mark_cache["sha1:$node->sha1"];
-          } else {
-            $mid = $nextmark++;
-            $mark_cache["sha1:$node->sha1"] = $mid;
-            fwrite($exp, "# mark for $node->path $node->sha1 $mid\n");
-            if ($dummy_blobs) {
-              fprintf($exp, "blob\nmark :%d\ndata 0\n", $mid);
-            } else {
-              fprintf($exp, "blob\nmark :%d\ndata %d\n", $mid, $node->size);
-              $node->streamText($R, $exp);
-            }
-            fwrite($exp, "\n");
-          }
+          $mid = find_mark_by_sha1($sha1, true);
           $mark_cache["file:$rev@$node->path"] = $mid;
           break;
 
@@ -1166,47 +1166,38 @@ while ($climit === null || $climit--) {
              * at this location in the code!).  In both cases, we need to be
              * able to determine the list of files in the source dir so that
              * we can eliminate everything but the origin dir. */
-//            var_dump($nodes);
-//            echo "$b\n";
-//            echo "$cb\n";
-//            echo "$cb->name vs $cpath\n";
+#            var_dump($nodes);
+#            echo "$b\n";
+#            echo "$cb\n";
+#            echo "$cb->name vs $cpath\n";
+            echo "Processing offset-branch $b\n";
 
-            $origin_base = dirname($cpath);
-            foreach ($cb->activity_by_path as $apath => $alist) {
-              /* if we're alive, we want to delete it! */
-              if ($cb->existsInRev($apath, $node->revision) &&
-                  $apath != $cpath &&
-                  dirname($apath) == $origin_base) {
-                fprintf($exp, "D %s\n", $cb->fixpath($apath));
-                $b->activity_by_path[$apath][$node->revision] = false;
-              }
-            }
+            $origin_parent = dirname($cpath);
+            $origin_name = basename($cpath);
 
-            /* phase two is that we need to rename files up to the top level */
-            $move_list = array();
-            foreach ($cb->activity_by_path as $apath => $alist) {
-              if (end($alist) && $apath != $cpath &&
-                  is_child_of($apath, $cpath)) {
-                $p = substr($apath, strlen($cpath) + 1);
-                $b->activity_by_path[$p][$node->revision] = true;
-                preg_match("@^([^/]+)(/.*)?$@", $p, $M);
-                $p = $M[1];
-                $move_list[$p] = $p;
+            $tree = $S->get_tree_by_rev($node->revision);
+            /* find things to delete */
+            $dir = $tree->resolve($origin_parent);
+            foreach ($dir->getChildren() as $k) {
+              $name = $k->getName();
+              if ($name != $origin_name) {
+                fprintf($exp, "D %s\n",
+                  $cb->fixpath("$origin_parent/$name"));
               }
             }
-//            print_r($move_list);
-            $origin_dir = basename($cpath);
-            foreach ($move_list as $p) {
-              if ($origin_dir == $p) {
-                /* avoid colliding with the source dir; we'll do this one
-                 * last */
-                continue;
+            /* find things to move, keeping the $origin_name last */
+            $dir = $tree->resolve($cpath);
+            foreach ($dir->getChildren() as $k) {
+              $name = $k->getName();
+              if ($name != $origin_name) {
+                fprintf($exp, "R %s %s\n",
+                  $cb->fixpath("$cpath/$name"), $name);
               }
-              fprintf($exp, "R %s %s\n", $cb->fixpath($cpath . "/$p"), $p);
             }
-            if (isset($move_list[$origin_dir])) {
-              printf($exp, "R %s %s\n",
-                $cb->fixpath($cpath . "/$origin_dir"), $origin_dir);
+            $k = $dir->getChild($origin_name);
+            if ($k !== null) {
+              fprintf($exp, "R %s %s\n",
+                $cb->fixpath($cpath), $origin_name);
             }
           }
         }
@@ -1250,11 +1241,6 @@ while ($climit === null || $climit--) {
       echo "What to do?\n";
       exit;
     }
-    if (false)
-    foreach ($b->getPropsForRev($rev, 'svn:externals') as $path => $pval) {
-      fprintf($exp, "M 100644 inline .svnexternals\ndata %d\n%s\n",
-        strlen($pval), $pval);
-    }
     if ($b->is_tag && $b->include && $b->deleted === null) {
       /* if we get here, check to see if we should create the tag.
        * We must be an impure tag.  We only create impure tags at the point
@@ -1269,6 +1255,153 @@ while ($climit === null || $climit--) {
         fprintf($exp, "data %d\n%s\n", strlen($log), $log);
         $mark_cache["commit-$b->name-$rev"] = $mid;
       }
+    }
+  }
+}
+
+function parse_externals($pval, $rev)
+{
+  $ext = array();
+  foreach (explode("\n", $pval) as $line) {
+    if (preg_match("/^(\S+)\s*-r\s*(\d+)\s+([^@]+)\s*$/", $line, $M)) {
+      $ext[] = array($M[1], $M[2], $M[3]);
+    } elseif (preg_match("/^(\S+)\s+([^@]+)\s*$/", $line, $M)) {
+      $ext[] = array($M[1], $rev, $M[2]);
+    }
+  }
+  return $ext;
+}
+
+function find_mark_by_path_and_rev($path, $rev)
+{
+  global $mark_cache;
+  while ($rev) {
+    if (isset($mark_cache["file:$path@$rev"])) {
+      return $mark_cache["file:$path@$rev"];
+    }
+    $rev--;
+  }
+  return null;
+}
+
+function find_mark_by_sha1($sha1, $create_mark = false)
+{
+  global $mark_cache;
+  global $S;
+  global $R;
+  global $exp;
+  global $nextmark;
+  global $dummy_blobs;
+
+  if (isset($mark_cache["sha1:$sha1"])) {
+    return $mark_cache["sha1:$sha1"];
+  }
+  if (!$create_mark) {
+    throw new Exception("make me summon up the mark for this sha1! $sha1");
+  }
+
+  $blob = $S->get_blob_by_sha1($sha1);
+  if (!($blob instanceof DataLocator)) {
+    throw new Exception("cannot locate blob for $sha1");
+  }
+
+  $mid = $nextmark++;
+  $mark_cache["sha1:$sha1"] = $mid;
+
+  if ($dummy_blobs) {
+    fprintf($exp, "blob\nmark :%d\ndata 0\n", $mid);
+  } else {
+    fprintf($exp, "blob\nmark :%d\ndata %d\n", $mid, $blob->size);
+    fseek($R->fp, $blob->offset);
+    stream_copy_to_stream($R->fp, $exp, $blob->size);
+  }
+  fwrite($exp, "\n");
+
+  return $mid;
+}
+
+
+if (count($flatten_externals)) {
+  // $rev is last revision seen.
+
+  // Build up list of distinct branch structures that we need to fabricate.
+  // We factor these out, because in our use case, we have multiple branches
+  // referencing another portion of the repo; it makes sense to the do the
+  // computation portion only once.
+
+  $distinct_externals = array();
+  $fixup_branches = array();
+
+  foreach ($flatten_externals as $branch_name) {
+    if (!isset($S->branches[$branch_name])) {
+      continue;
+    }
+    $b = $S->branches[$branch_name];
+    if ($b->is_tag || !$b->include) continue;
+    $props = $b->getPropsForRev($rev, 'svn:externals');
+    if (count($props)) {
+      foreach ($props as $path => $pval) {
+        foreach (parse_externals($pval, $rev) as $ext) {
+          list($local, $peg, $remote) = $ext;
+          $local = $b->fixpath("$path/$local");
+          foreach ($local_externals as $lext) {
+            if (is_child_of($remote, $lext)) {
+              $remote = substr($remote, strlen($lext) + 1);
+              $bname = md5("$local@$peg@$remote");
+              $distinct_externals[$bname] = array($local, $peg, $remote);
+              $fixup_branches[] = array($b, $path, $bname);
+              echo "$b: $local $peg $remote\n";
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  foreach ($distinct_externals as $bname => $lext) {
+    list($local, $srev, $remote) = $lext;
+    echo "Do fixup for $local $srev $remote\n";
+
+    /* Goal: copy in the data from the origin branch @ $srev.
+     * We can't just tell fast-import to merge, because it will merge
+     * away the existing contents of the destintation branch... */
+
+    $rules = array();
+
+    // Source from last activity on the origin branch
+    $b = $S->find_branch($remote);
+    if ($b === null) {
+      throw new Exception("Unable to find $remote!");
+    }
+
+    $tree = $S->get_tree_by_rev($srev);
+    $list = $tree->getFQList($remote);
+    foreach ($list as $name => $k) {
+      if ($k->getType() != 'file') continue;
+      $rules[] = sprintf("M %s :%d %s/%s\n",
+        $k->getMode(),
+        find_mark_by_sha1($k->getHash()),
+        $local, $b->fixpath($name));
+    }
+    $lext[] = $rules;
+    $distinct_externals[$bname] = $lext;
+  }
+
+  // Now we can go ahead and apply the rules to each of the destination
+  // branches
+  foreach ($fixup_branches as $fdata) {
+    list($b, $path, $bname) = $fdata;
+    list($local, $srev, $remote, $rules) = $distinct_externals[$bname];
+
+    echo "$b path:$path local:$local $srev $remote\n";
+    fprintf($exp, "commit refs/heads/$b->bname\n");
+    fprintf($exp, "committer svn-to-git <svn-to-git@example.com> %d -0000\n",
+      time());
+    fwrite($exp, "data <<EOT\n" .
+        "Manufactured to flatten $remote @ [$srev] to $local\nEOT\n");
+    foreach ($rules as $rule) {
+      fwrite($exp, $rule);
     }
   }
 }
@@ -1294,6 +1427,7 @@ function rmdir_r($path)
   }
 }
 
+$S = null;
 fclose($exp);
 if (is_resource($GIT_FAST_IMPORT)) {
   proc_close($GIT_FAST_IMPORT);
@@ -1302,7 +1436,8 @@ if (is_resource($GIT_FAST_IMPORT)) {
     rmdir_r($target_git_repo_location . "/.git/TAG_FIXUP");
   }
   $GM = array();
-  foreach (file($git_mark_file) as $line) {
+  $fp = fopen($git_mark_file, 'r');
+  while (($line = fgets($fp)) !== false) {
     if (preg_match("/^:(\d+)\s+([a-f0-9]+)\s*$/", $line, $M)) {
       $GM[$M[1]] = $M[2];
     }
