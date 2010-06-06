@@ -25,8 +25,6 @@ class SvnDumpNode {
   public $size = 0;
   /** starting offset of file payload in the dump file */
   public $start = 0;
-  /** md5 checksum */
-  public $md5;
   /** sha1 checksum */
   public $sha1;
 
@@ -187,7 +185,6 @@ class SvnDumpReader {
         }
         if (isset($k['text-content-length'])) {
           $node->size = (int)$k['text-content-length'];
-          $node->md5 = $k['text-content-md5'];
           $node->sha1 = $k['text-content-sha1'];
           $node->start = ftell($this->fp);
         }

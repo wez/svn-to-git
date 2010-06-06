@@ -11,7 +11,9 @@ class SvnFile {
   protected $n;
   protected $k = null;
   protected $g;
-  static $sleep = array('m', 'h', 'n', 'k');
+  protected $e;
+  static $sleepf = array('m', 'h', 'n');
+  static $sleepd = array('m', 'n', 'k', 'e');
   const IS_ROOT = 0;
   const IS_FILE = 1;
   const IS_EXEC = 2;
@@ -27,7 +29,21 @@ class SvnFile {
   }
 
   function __sleep() {
-    return self::$sleep;
+    if ($this->m == self::IS_ROOT || $this->m == self::IS_DIR) {
+      return self::$sleepd;
+    }
+    return self::$sleepf;
+  }
+
+  function setExternals($v) {
+    if ($v !== null) {
+      $v = trim(preg_replace("/\s+/", ' ', $v));
+    }
+    $this->e = $v;
+  }
+
+  function getExternals() {
+    return $this->e;
   }
 
   /* store the sha1 as the binary bits internally to reduce memory
@@ -50,7 +66,10 @@ class SvnFile {
   }
 
   function getChildren() {
-    return $this->k;
+    if (is_array($this->k)) {
+      return $this->k;
+    }
+    return array();
   }
 
   function setChild(SvnFile $kid) {
@@ -132,7 +151,8 @@ class SvnFile {
       $p = array_shift($bits);
       $k = $node->getChild($p);
       if ($k === null) {
-        throw new Exception("$path not found in $node->n");
+        //$node->print_listing($node->n);
+        throw new Exception("$path not found in $node->n @ $node->g ($this->g)");
       }
       $node = $k;
     }
@@ -172,6 +192,24 @@ class SvnFile {
     return $node;
   }
 
+  function enumerateExternals($path) {
+    $props = array();
+    $n = $this->resolve($path);
+    $n->enumExternalsInner($path, $props);
+    return $props;
+  }
+
+  private function enumExternalsInner($path, &$props) {
+    if ($this->e != null) {
+      $props[$path] = $this->e;
+    }
+    if (is_array($this->k)) {
+      foreach ($this->k as $k) {
+        $k->enumExternalsInner("$path/$k->n", $props);
+      }
+    }
+  }
+
   /* returns a hash of FQN => SvnFile for each item under the specified $path */
   function getFQList($path) {
     $list = array();
@@ -199,16 +237,18 @@ class SvnFile {
     } else {
       echo "TOP:\n";
     }
-    foreach ($this->k as $k) {
-      if ($k->getType() == 'dir') {
-        echo "   $k->n/\n";
-      } else {
-        echo "   $k->n\n";
+    if (is_array($this->k)) {
+      foreach ($this->k as $k) {
+        if ($k->getType() == 'dir') {
+          echo "   $k->n/\n";
+        } else {
+          echo "   $k->n\n";
+        }
       }
     }
     foreach ($this->k as $k) {
       if ($k->getType() == 'dir') {
-        $k->print_listing("$relpath$this->name");
+        $k->print_listing("$relpath$this->n");
       }
     }
   }
@@ -296,33 +336,10 @@ class Branch {
     return $res;
   }
 
-  function getPropsForRev($rev, $wantedprop) {
-    $props = array();
-    if (isset($this->props[$wantedprop])) {
-      foreach ($this->props[$wantedprop] as $path => $plist) {
-        $val = find_key_or_prior2($plist, $rev, $r);
-        if ($val !== null) {
-          $props[$path] = $val;
-          if ($r < $rev) {
-            // carry forward to improve performance of next lookup
-            $this->props[$wantedprop][$path][$rev] = $val;
-          }
-        }
-      }
-    }
-    return $props;
-  }
-
   function addActivity(SvnDumpReader $R, Repo $S) {
     $this->activity[$R->revision] = $R->revision;
     foreach ($R->nodes as $node) {
       if (is_child_of($node->path, $this->name)) {
-        if (is_array($node->props)) {
-          foreach ($node->props as $propname => $propval) {
-            $this->props[$propname][$node->path][$R->revision] = $propval;
-            arsort($this->props[$propname][$node->path]);
-          }
-        }
         switch ($node->action) {
           case 'add':
           case 'change':
@@ -381,6 +398,12 @@ class Repo {
     return $this->blob_by_sha1[$sha1];
   }
 
+  function getExternalsForRev($base, $rev) {
+    $tree = $this->get_tree_by_rev($rev);
+    return $tree->enumerateExternals($base);
+  }
+
+
   function discover(SvnDumpReader $R) {
     if ($R->revision) {
       $tree = $this->get_tree_by_rev($R->revision - 1);
@@ -417,6 +440,10 @@ class Repo {
               $n->setHash($this->determine_sha1_for_node($node));
             }
           }
+          if ($node->kind == 'dir' && is_array($node->props)) {
+            $n->setExternals($node->props['svn:externals']);
+          }
+
           $n->setName(basename($node->path));
           $pnode->setChild($n);
           break;
@@ -438,6 +465,9 @@ class Repo {
             }
           } else {
             /* can trigger when props change on a dir */
+            if (is_array($node->props)) {
+              $n->setExternals($node->props['svn:externals']);
+            }
           }
           break;
 
@@ -448,6 +478,9 @@ class Repo {
             $pnode->removeChild(basename($node->path));
             $n = new SvnFile($R->revision, 'dir');
             $n->setName(basename($node->path));
+            if (is_array($node->props)) {
+              $n->setExternals($node->props['svn:externals']);
+            }
             $pnode->setChild($n);
           } else {
             $n = $tree->resolveForWrite($node->path);

@@ -476,7 +476,7 @@ if ($mode === null || $mode == 'ANALYZE') {
     if (isset($R->revprops['svn:author'])) {
       $authors[$R->revprops['svn:author']] = true;
     }
-    list($log) = explode("\n", $R->revprops['svn:log']);
+    list($log) = explode("\n", trim($R->revprops['svn:log']));
     $log = substr($log, 0, 40);
     echo "DEBUG: ", $R->revision, " $log\n";
     foreach ($R->nodes as $node) {
@@ -817,6 +817,119 @@ function map_author($name)
   return $str;
 }
 
+function compute_rules($nodes, $mode)
+{
+  global $S;
+  global $exp;
+
+  foreach ($nodes as $node) {
+    if (is_excluded($node->path)) continue;
+
+    if (isset($node->meta['node-copyfrom-path'])) {
+      $crev = $node->meta['node-copyfrom-rev'];
+      $cpath = $node->meta['node-copyfrom-path'];
+      $cb = $S->find_branch($cpath, $crev);
+    } else {
+      $cpath = null;
+      $cb = null;
+    }
+    $b = $S->find_branch($node);
+
+    if ($node->kind == 'dir' && $node->action == 'add' && $cpath !== null) {
+      if ($cb == null) throw new Exception("no branch for $cpath!?");
+
+      $origin_parent = dirname($cpath);
+      $origin_name = basename($cpath);
+      $target = $b->fixpath($node->path);
+      if (strlen($target)) $target .= '/';
+
+      /* find things to add */
+      $tree = $S->get_tree_by_rev($crev);
+      $list = $tree->getFQList($cpath);
+      foreach ($list as $name => $k) {
+        if ($k->getType() != 'file') continue;
+        if ($mode == 'MARKUP') {
+          find_mark_by_sha1($k->getHash(), true);
+        } else if ($mode == 'EMIT_RULES') {
+          $n = substr($name, strlen($cpath) + 1);
+#          echo "$node->path target:$target name:$name n:$n cpath:$cpath\n";
+          fprintf($exp, "M %s :%d %s\n",
+              $k->getMode(),
+              find_mark_by_sha1($k->getHash()),
+              $b->fixpath("$node->path/$n"));
+        }
+      }
+      if (false) {
+        $dir = $tree->resolve($cpath);
+        foreach ($dir->getChildren() as $k) {
+          if ($k->getType() == 'file') {
+            $name = $k->getName();
+            if ($mode == 'MARKUP') {
+              find_mark_by_sha1($k->getHash(), true);
+            } else if ($mode == 'EMIT_RULES') {
+              fprintf($exp, "M %s :%d %s%s\n",
+                  $k->getMode(),
+                  find_mark_by_sha1($k->getHash()),
+                  $target,
+                  $cb->fixpath("$cpath/$name"));
+            }
+          }
+        }
+      }
+    }
+    if ($node->kind == 'dir' && $mode == 'EMIT_RULES') {
+      if (is_array($node->props)) {
+        if (isset($node->props['svn:externals'])) {
+          $pval = $node->props['svn:externals'];
+          fprintf($exp, "M 100644 inline %s\ndata %d\n%s\n",
+              $b->fixpath($node->path . '/.svnexternals'),
+              strlen($pval), $pval);
+        } else {
+          fprintf($exp, "D %s\n",
+              $b->fixpath($node->path . '/.svnexternals'));
+        }
+      }
+    }
+    if ($node->action == 'delete') {
+      if ($node->path == $b->name) {
+        /* would evaluate to an empty string */
+        continue;
+      } else if ($mode == 'EMIT_RULES') {
+        fprintf($exp, "D %s\n", $b->fixpath($node->path));
+      }
+      continue;
+    }
+    if ($node->kind == 'file') {
+      $tree = $S->get_tree_by_rev($node->revision);
+      $item = $tree->resolve($node->path);
+      $sha1 = $S->determine_sha1_for_node($node);
+
+      /* Seems lame, but without a way to figure out the content,
+       * we can't figure out what changed; this case triggers for
+       * property changes, like svn:mergeinfo */
+      if (!strlen($sha1) && $node->action == 'change') {
+        continue;
+      }
+
+      if (!strlen($sha1)) {
+        var_dump($node);
+        echo "No sha1!?\n";
+        exit;
+      }
+
+      if ($mode == 'MARKUP') {
+        find_mark_by_sha1($sha1, true);
+      } else if ($mode == 'EMIT_RULES') {
+        fprintf($exp, "M %s :%d %s\n",
+            $item->getMode(),
+            find_mark_by_sha1($sha1),
+            $b->fixpath($node->path));
+      }
+      continue;
+    }
+  }
+}
+
 echo "NOTICE: Generating Git export file\n";
 $TAG_FIXUP = array();
 $climit = $limit;
@@ -868,131 +981,23 @@ while ($climit === null || $climit--) {
     $offset_branch = null;
 
     /* first pass through to mark any blobs we're putting in */
-    foreach ($nodes as $node) {
+    compute_rules($nodes, 'MARKUP');
 
-      /* also check for svn merge information */
-      if ($use_mergeinfo &&
-          isset($node->props['svn:mergeinfo']) &&
-          strlen($node->props['svn:mergeinfo'])) {
-        foreach (diff_mergeinfo_props($node) as $msource) {
-          $mkey = "commit-$msource->branch-$msource->rev";
-          if (isset($mark_cache[$mkey])) {
-            $mid = $mark_cache[$mkey];
-            fwrite($exp, "# adding $mid as merge source due to svn:mergeinfo\n");
-            $merge_sources[$mid] = $mid;
+    if ($use_mergeinfo) {
+      foreach ($nodes as $node) {
+        /* also check for svn merge information */
+        if (isset($node->props['svn:mergeinfo']) &&
+            strlen($node->props['svn:mergeinfo'])) {
+          foreach (diff_mergeinfo_props($node) as $msource) {
+            $mkey = "commit-$msource->branch-$msource->rev";
+            if (isset($mark_cache[$mkey])) {
+              $mid = $mark_cache[$mkey];
+              fwrite($exp,
+                "# adding $mid as merge source due to svn:mergeinfo\n");
+              $merge_sources[$mid] = $mid;
+            }
           }
         }
-      }
-
-      if ($node->kind != 'file') continue;
-      if (is_excluded($node->path)) continue;
-
-      switch ($node->action) {
-        case 'add':
-        case 'change':
-        case 'replace':
-          $sha1 = $S->determine_sha1_for_node($node);
-          if ($sha1 === null) {
-            if (isset($node->meta['node-copyfrom-rev']) &&
-                isset($node->meta['node-copyfrom-path'])) {
-              /* dup a prior mark */
-              $crev = $node->meta['node-copyfrom-rev'];
-              $cpath = $node->meta['node-copyfrom-path'];
-
-              $cb = $S->find_branch($cpath, $crev);
-              if ($cb && isset($mark_cache["commit-$cb->name-$crev"])) {
-                $mid = $mark_cache["commit-$cb->name-$crev"];
-                $merge_sources[$mid] = $mid;
-                fwrite($exp, "# adding $mid as merge source due to copy from $node->path\n");
-              }
-              if (isset($mark_cache["file:$crev@$cpath"])) {
-                /* make an alias */
-                $mark_cache["file:$rev@$node->path"] =
-                  $mark_cache["file:$crev@$cpath"];
-                break;
-              }
-              if (isset($node->meta['text-copy-source-sha1'])) {
-                $sha1 = $node->meta['text-copy-source-sha1'];
-                if (isset($mark_cache["sha1:$sha1"])) {
-                  /* make an alias */
-                  $mark_cache["file:$rev@$node->path"] =
-                    $mark_cache["sha1:$sha1"];
-                  break;
-                }
-              }
-            } elseif ($node->action == 'change') {
-              /* property only change */
-              break;
-            }
-            /* let's go looking for a node in the dump that has the text */
-            $sb = $S->find_branch(
-                    $node->meta['node-copyfrom-path'],
-                    $node->meta['node-copyfrom-rev']);
-            if ($sb) {
-              $spath = $node->meta['node-copyfrom-path'];
-              $mid = null;
-              for ($srev = $node->meta['node-copyfrom-rev']; $srev > 0; $srev--)
-              {
-          throw new Exception("fixme");
-                if (!isset($sb->activity_by_path[$spath][$srev])) {
-                  continue;
-                }
-                if (!$R->getByRev($srev)) {
-                  echo "couldn't seek to rev $srev\n";
-                  break;
-                }
-                foreach ($R->nodes as $snode) {
-                  if ($snode->path != $spath) {
-                    continue;
-                  }
-                  if ($snode->sha1 === null) {
-                    // FIXME: recursively follow copies
-                    echo "FIXME: recursive follow\n";
-                    echo "FIXME: workaround this by using --branch instead of --exclude-branch for $spath\n";
-                    var_dump($snode);
-                    break;
-                  }
-                  if (isset($mark_cache["sha1:$snode->sha1"])) {
-                    $mid = $mark_cache["sha1:$snode->sha1"];
-                  } else {
-                    $mid = $nextmark++;
-                    $mark_cache["sha1:$snode->sha1"] = $mid;
-                    fwrite($exp, "# mark for $snode->path $snode->sha1 $mid\n");
-                    if ($dummy_blobs) {
-                      fprintf($exp, "blob\nmark :%d\ndata 0\n", $mid);
-                    } else {
-                      fprintf($exp, "blob\nmark :%d\ndata %d\n", $mid,
-                        $snode->size);
-                      $snode->streamText($R, $exp);
-                    }
-                    fwrite($exp, "\n");
-                  }
-                  $mark_cache["file:$rev@$node->path"] = $mid;
-                  break;
-                }
-              }
-              // re-sync back to current revision
-              $R->getByRev($rev);
-              if ($mid !== null) {
-                break;
-              }
-            }
-            echo "Don't know how to get at text for node:\n";
-            var_dump($node);
-            echo "sb is $sb\n";
-            exit;
-          }
-          $mid = find_mark_by_sha1($sha1, true);
-          $mark_cache["file:$rev@$node->path"] = $mid;
-          break;
-
-        case 'delete':
-          break;
-
-        default:
-          var_dump($node);
-          echo "Unhandled action $node->action\n";
-          exit;
       }
     }
 
@@ -1047,7 +1052,13 @@ while ($climit === null || $climit--) {
     }
 
     fwrite($exp, "# svn [$rev]\n");
-    fwrite($exp, "progress rev [$rev]\n");
+    $x = fwrite($exp, "progress rev [$rev]\n");
+    if ($x === false || $x < 5) {
+      if ($GIT_FAST_IMPORT !== null) {
+        print_r(proc_get_status($GIT_FAST_IMPORT));
+      }
+      throw new Exception("Failed to write to Git stream!");
+    }
 
     /* figure out whether we need to kill or re-create the branch.
      * This is made more complicated by the possibility for one svn
@@ -1068,6 +1079,7 @@ while ($climit === null || $climit--) {
               echo "FATAL: while recreating $b->name @ $rev\n";
               exit(1);
             }
+            fwrite($exp, "# commit_source: $node->path vs $b->name. copyfrom $spath@$srev\n");
             $mid = null;
             while ($mid === null) {
               $mid = $mark_cache["commit-$sb->name-$srev"];
@@ -1111,6 +1123,7 @@ while ($climit === null || $climit--) {
       fprintf($exp, "from :%d\n", $commit_source);
     } else if ($b->createdrev == $rev && $b->origin !== null) {
       if ($b->origin->last_mark) {
+        fwrite($exp, "# commit_source: using last_mark from origin branch\n");
         fprintf($exp, "from :%d\n", $b->origin->last_mark);
       } else {
         var_dump($nodes);
@@ -1143,104 +1156,8 @@ while ($climit === null || $climit--) {
     }
     $b->last_mark = $future_last_mark;
 
-    foreach ($nodes as $node) {
-      if (is_excluded($node->path)) continue;
+    compute_rules($nodes, 'EMIT_RULES');
 
-      if ($node->kind == 'dir' && $node->action == 'add' &&
-          isset($node->meta['node-copyfrom-path'])) {
-        $crev = $node->meta['node-copyfrom-rev'];
-        $cpath = $node->meta['node-copyfrom-path'];
-
-        $cb = $S->find_branch($cpath, $crev);
-        if ($cb && $b->createdrev == $rev) {
-          if ($cb->name == $cpath) {
-            $offset_branch = false;
-          } else if ($offset_branch === null) {
-            /* This case triggers when a branch is created by copying
-             * a sub-directory out of an existing branch and using that
-             * as the basis for the new branch.
-             * There are two ways to model this operation:
-             * 1. create an empty branch and populate every file individually
-             * 2. create a branch and then move files around to match
-             * The latter is preferable (and the only one available to execute
-             * at this location in the code!).  In both cases, we need to be
-             * able to determine the list of files in the source dir so that
-             * we can eliminate everything but the origin dir. */
-#            var_dump($nodes);
-#            echo "$b\n";
-#            echo "$cb\n";
-#            echo "$cb->name vs $cpath\n";
-            echo "Processing offset-branch $b\n";
-
-            $origin_parent = dirname($cpath);
-            $origin_name = basename($cpath);
-
-            $tree = $S->get_tree_by_rev($node->revision);
-            /* find things to delete */
-            $dir = $tree->resolve($origin_parent);
-            foreach ($dir->getChildren() as $k) {
-              $name = $k->getName();
-              if ($name != $origin_name) {
-                fprintf($exp, "D %s\n",
-                  $cb->fixpath("$origin_parent/$name"));
-              }
-            }
-            /* find things to move, keeping the $origin_name last */
-            $dir = $tree->resolve($cpath);
-            foreach ($dir->getChildren() as $k) {
-              $name = $k->getName();
-              if ($name != $origin_name) {
-                fprintf($exp, "R %s %s\n",
-                  $cb->fixpath("$cpath/$name"), $name);
-              }
-            }
-            $k = $dir->getChild($origin_name);
-            if ($k !== null) {
-              fprintf($exp, "R %s %s\n",
-                $cb->fixpath($cpath), $origin_name);
-            }
-          }
-        }
-      }
-      if (isset($node->props['svn:externals'])) {
-        $pval = $node->props['svn:externals'];
-        fprintf($exp, "M 100644 inline %s\ndata %d\n%s\n",
-          $b->fixpath($node->path . '/.svnexternals'),
-          strlen($pval), $pval);
-      }
-      if ($node->path == $b->name && $node->action == 'add') {
-        continue;
-      }
-      if ($node->action == 'delete') {
-        if ($node->path == $b->name) {
-          continue;
-        } else {
-          fprintf($exp, "D %s\n", $b->fixpath($node->path));
-        }
-        continue;
-      }
-      if ($node->kind == 'file') {
-        if ($node->action == 'change' && $node->sha1 === null &&
-            !isset($node->meta['node-copyfrom-path'])) {
-          /* prop only change */
-          echo "[$rev] FIXME: prop only change\n";
-          continue;
-        }
-        if ($node->action == 'add' || $node->action == 'change' ||
-            $node->action == 'replace') {
-          $mode = isset($node->props['svn:executable']) ? '100755' : '100644';
-          fprintf($exp, "M %s :%d %s\n", $mode,
-            $mark_cache["file:$rev@$node->path"], $b->fixpath($node->path));
-          continue;
-        }
-      } else if ($node->kind == 'dir') {
-        continue;
-      }
-
-      var_dump($node);
-      echo "What to do?\n";
-      exit;
-    }
     if ($b->is_tag && $b->include && $b->deleted === null) {
       /* if we get here, check to see if we should create the tag.
        * We must be an impure tag.  We only create impure tags at the point
@@ -1324,34 +1241,50 @@ function find_mark_by_sha1($sha1, $create_mark = false)
 if (count($flatten_externals)) {
   // $rev is last revision seen.
 
-  // Build up list of distinct branch structures that we need to fabricate.
-  // We factor these out, because in our use case, we have multiple branches
-  // referencing another portion of the repo; it makes sense to the do the
-  // computation portion only once.
-
-  $distinct_externals = array();
-  $fixup_branches = array();
-
   foreach ($flatten_externals as $branch_name) {
     if (!isset($S->branches[$branch_name])) {
       continue;
     }
     $b = $S->branches[$branch_name];
     if ($b->is_tag || !$b->include) continue;
-    $props = $b->getPropsForRev($rev, 'svn:externals');
-    if (count($props)) {
-      foreach ($props as $path => $pval) {
-        foreach (parse_externals($pval, $rev) as $ext) {
-          list($local, $peg, $remote) = $ext;
-          $local = $b->fixpath("$path/$local");
-          foreach ($local_externals as $lext) {
-            if (is_child_of($remote, $lext)) {
-              $remote = substr($remote, strlen($lext) + 1);
-              $bname = md5("$local@$peg@$remote");
-              $distinct_externals[$bname] = array($local, $peg, $remote);
-              $fixup_branches[] = array($b, $path, $bname);
-              echo "$b: $local $peg $remote\n";
-              break;
+
+    $props = $S->getExternalsForRev($b->name, $rev);
+    if (!count($props)) {
+      continue;
+    }
+    foreach ($props as $path => $pval) {
+      foreach (parse_externals($pval, $rev) as $ext) {
+        list($local, $peg, $remote) = $ext;
+
+        foreach ($local_externals as $lext) {
+          if (is_child_of($remote, $lext)) {
+            $remote = substr($remote, strlen($lext) + 1);
+            $bname = md5("$path/$local@$peg@$remote");
+
+            echo "$b path:$path local:$local $peg $remote\n";
+
+            // Source from last activity on the origin branch
+            $cb = $S->find_branch($remote);
+            if ($cb === null) {
+              throw new Exception("Unable to find $remote!");
+            }
+
+            fprintf($exp, "commit refs/heads/$b->bname\n");
+            fprintf($exp,
+                "committer svn-to-git <svn-to-git@example.com> %d -0000\n",
+                time());
+            fwrite($exp, "data <<EOT\n" .
+                "Manufactured to flatten $remote @ [$peg] to $local\nEOT\n");
+
+            $tree = $S->get_tree_by_rev($peg);
+            $list = $tree->getFQList($remote);
+            foreach ($list as $name => $k) {
+              if ($k->getType() != 'file') continue;
+              $n = substr($name, strlen($remote)+1);
+              fprintf($exp, "M %s :%d %s\n",
+                  $k->getMode(),
+                  find_mark_by_sha1($k->getHash()),
+                  $b->fixpath("$path/$local/$n"));
             }
           }
         }
@@ -1359,51 +1292,6 @@ if (count($flatten_externals)) {
     }
   }
 
-  foreach ($distinct_externals as $bname => $lext) {
-    list($local, $srev, $remote) = $lext;
-    echo "Do fixup for $local $srev $remote\n";
-
-    /* Goal: copy in the data from the origin branch @ $srev.
-     * We can't just tell fast-import to merge, because it will merge
-     * away the existing contents of the destintation branch... */
-
-    $rules = array();
-
-    // Source from last activity on the origin branch
-    $b = $S->find_branch($remote);
-    if ($b === null) {
-      throw new Exception("Unable to find $remote!");
-    }
-
-    $tree = $S->get_tree_by_rev($srev);
-    $list = $tree->getFQList($remote);
-    foreach ($list as $name => $k) {
-      if ($k->getType() != 'file') continue;
-      $rules[] = sprintf("M %s :%d %s/%s\n",
-        $k->getMode(),
-        find_mark_by_sha1($k->getHash()),
-        $local, $b->fixpath($name));
-    }
-    $lext[] = $rules;
-    $distinct_externals[$bname] = $lext;
-  }
-
-  // Now we can go ahead and apply the rules to each of the destination
-  // branches
-  foreach ($fixup_branches as $fdata) {
-    list($b, $path, $bname) = $fdata;
-    list($local, $srev, $remote, $rules) = $distinct_externals[$bname];
-
-    echo "$b path:$path local:$local $srev $remote\n";
-    fprintf($exp, "commit refs/heads/$b->bname\n");
-    fprintf($exp, "committer svn-to-git <svn-to-git@example.com> %d -0000\n",
-      time());
-    fwrite($exp, "data <<EOT\n" .
-        "Manufactured to flatten $remote @ [$srev] to $local\nEOT\n");
-    foreach ($rules as $rule) {
-      fwrite($exp, $rule);
-    }
-  }
 }
 
 function rmdir_r($path)
