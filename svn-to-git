@@ -859,23 +859,6 @@ function compute_rules($nodes, $mode)
               $b->fixpath("$node->path/$n"));
         }
       }
-      if (false) {
-        $dir = $tree->resolve($cpath);
-        foreach ($dir->getChildren() as $k) {
-          if ($k->getType() == 'file') {
-            $name = $k->getName();
-            if ($mode == 'MARKUP') {
-              find_mark_by_sha1($k->getHash(), true);
-            } else if ($mode == 'EMIT_RULES') {
-              fprintf($exp, "M %s :%d %s%s\n",
-                  $k->getMode(),
-                  find_mark_by_sha1($k->getHash()),
-                  $target,
-                  $cb->fixpath("$cpath/$name"));
-            }
-          }
-        }
-      }
     }
     if ($node->kind == 'dir' && $mode == 'EMIT_RULES') {
       if (is_array($node->props)) {
