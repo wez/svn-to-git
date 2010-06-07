@@ -273,6 +273,9 @@ Less Common Options:
        the external will be copied into the branch tree, effectively
        eliminating the external from that point on.
 
+       FIXME: seems to "lose" history at the point where things are
+       flattened.
+
 Rare Options:
 
   --git-mark-file git.marks
